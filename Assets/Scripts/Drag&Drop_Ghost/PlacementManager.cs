@@ -76,6 +76,8 @@ public class PlacementManager : MonoBehaviour
     public bool alignGhostBottomToSpawn = true;
     public UnityEvent onStepCompleted;
     public UnityEvent onAllCompleted;
+    [Tooltip("Вызывается при ResetAssembly(): сборка начата заново")]
+    public UnityEvent onReset;
 
     class GhostData
     {
@@ -93,6 +95,28 @@ public class PlacementManager : MonoBehaviour
     void Start()
     {
         nextSpawnPos = firstSpawnPoint != null ? firstSpawnPoint.position : transform.position;
+        NextStep();
+    }
+
+    /// <summary>
+    /// Начать сборку заново: убирает призраков и все поставленные детали,
+    /// возвращает первый шаг и точку спавна.
+    /// </summary>
+    public void ResetAssembly()
+    {
+        foreach (var g in ghosts)
+            if (g != null && g.go != null) Destroy(g.go);
+        ghosts.Clear();
+        placedInStep.Clear();
+        remaining = 0;
+
+        foreach (var it in PlacementItem.All.ToArray())
+            if (it != null && it.isPlaced) Destroy(it.gameObject);
+
+        index = -1;
+        nextSpawnPos = firstSpawnPoint != null ? firstSpawnPoint.position : transform.position;
+
+        onReset?.Invoke();
         NextStep();
     }
 
