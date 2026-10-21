@@ -261,7 +261,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 18940341415c1a14c96d642fcf2470a0, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::PlacementItem
-  id: s
+  id: soed
   isPlaced: 0
 --- !u!114 &3161509552571522154
 MonoBehaviour:
