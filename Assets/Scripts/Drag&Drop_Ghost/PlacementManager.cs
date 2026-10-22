@@ -48,6 +48,31 @@ public class PlacementStep
     [Tooltip("Необязательно: точные позиции И повороты копий (берутся у Transform). Если заполнено, count и copyOffset игнорируются")]
     public Transform[] copyPoints;
 
+    [Header("Авто-спавн самой детали (необязательно)")]
+    [Tooltip("Спавнить деталь автоматически, когда начинается этот шаг. Если выключено - деталь берётся из меню, как раньше")]
+    public bool spawnItem = false;
+
+    [Tooltip("Префаб самой детали (с PlacementItem и XRGrabInteractable). id подставится из itemId")]
+    public GameObject itemPrefab;
+
+    [Tooltip("Где появится деталь. Если пусто - берётся 'Точка спавна деталей по умолчанию' из менеджера")]
+    public Transform itemSpawnPoint;
+
+    [Tooltip("Доп. смещение от точки спавна детали")]
+    public Vector3 itemSpawnOffset;
+
+    [Min(0)]
+    [Tooltip("Сколько деталей заспавнить. 0 = столько же, сколько призраков в шаге")]
+    public int itemCount = 0;
+
+    [Tooltip("Смещение каждой следующей детали (если их несколько), чтобы не лежали в одной точке")]
+    public Vector3 itemCopyOffset = new Vector3(0.3f, 0f, 0f);
+
+    [Tooltip("Включено: деталь появляется по одной - следующая после установки предыдущей. Выключено: все сразу")]
+    public bool itemsOneByOne = false;
+
+    public int ItemTotal => itemCount > 0 ? itemCount : TotalCount;
+
     public int TotalCount => (copyPoints != null && copyPoints.Length > 0) ? copyPoints.Length : Mathf.Max(1, count);
 }
 
@@ -71,11 +96,19 @@ public class PlacementManager : MonoBehaviour
     [Tooltip("Запас триггера вокруг призрака, метры")]
     public float triggerPadding = 0.1f;
 
+    [Header("Спавн деталей")]
+    [Tooltip("Общая точка спавна деталей, если в шаге своя не задана")]
+    public Transform defaultItemSpawnPoint;
+    [Tooltip("Когда шаг завершён, удалить заспавненные для него детали, которые так и не поставили")]
+    public bool destroyLeftoverItems = true;
+
     [Header("Прочее")]
     [Tooltip("Ставить низ следующего призрака на точку спавна (режим AfterPrevious)")]
     public bool alignGhostBottomToSpawn = true;
     public UnityEvent onStepCompleted;
     public UnityEvent onAllCompleted;
+    [Tooltip("Вызывается при ResetAssembly(): сборка начата заново")]
+    public UnityEvent onReset;
 
     class GhostData
     {
@@ -90,9 +123,39 @@ public class PlacementManager : MonoBehaviour
     readonly List<GameObject> placedInStep = new List<GameObject>();
     int remaining;
 
+    readonly List<GameObject> spawnedItems = new List<GameObject>();
+    int itemsSpawnedInStep;
+
     void Start()
     {
         nextSpawnPos = firstSpawnPoint != null ? firstSpawnPoint.position : transform.position;
+        NextStep();
+    }
+
+    /// <summary>
+    /// Начать сборку заново: убирает призраков и все поставленные детали,
+    /// возвращает первый шаг и точку спавна.
+    /// </summary>
+    public void ResetAssembly()
+    {
+        foreach (var g in ghosts)
+            if (g != null && g.go != null) Destroy(g.go);
+        ghosts.Clear();
+        placedInStep.Clear();
+        remaining = 0;
+
+        foreach (var it in PlacementItem.All.ToArray())
+            if (it != null && it.isPlaced) Destroy(it.gameObject);
+
+        foreach (var go in spawnedItems)
+            if (go != null) Destroy(go);
+        spawnedItems.Clear();
+        itemsSpawnedInStep = 0;
+
+        index = -1;
+        nextSpawnPos = firstSpawnPoint != null ? firstSpawnPoint.position : transform.position;
+
+        onReset?.Invoke();
         NextStep();
     }
 
@@ -109,6 +172,7 @@ public class PlacementManager : MonoBehaviour
 
     void SpawnStep(PlacementStep step)
     {
+        itemsSpawnedInStep = 0;
         ghosts.Clear();
         placedInStep.Clear();
         remaining = 0;
@@ -155,6 +219,65 @@ public class PlacementManager : MonoBehaviour
         {
             Debug.LogError($"[PlacementManager] Шаг '{step.name}': ни один призрак не создан, шаг пропущен.", this);
             NextStep();
+            return;
+        }
+
+        // авто-спавн детали (если включён в шаге)
+        SpawnItems(step, step.itemsOneByOne ? 1 : step.ItemTotal);
+    }
+
+    // Спавнит до n деталей шага, но не больше ItemTotal.
+    void SpawnItems(PlacementStep step, int n)
+    {
+        if (!step.spawnItem) return;
+
+        if (step.itemPrefab == null)
+        {
+            Debug.LogWarning($"[PlacementManager] В шаге '{step.name}' включён spawnItem, но не задан itemPrefab.", this);
+            return;
+        }
+
+        Transform point = step.itemSpawnPoint != null ? step.itemSpawnPoint : defaultItemSpawnPoint;
+        if (point == null)
+        {
+            Debug.LogWarning($"[PlacementManager] В шаге '{step.name}' не задана точка спавна детали (и нет defaultItemSpawnPoint).", this);
+            return;
+        }
+
+        for (int k = 0; k < n && itemsSpawnedInStep < step.ItemTotal; k++)
+        {
+            Vector3 pos = point.position + step.itemSpawnOffset + step.itemCopyOffset * itemsSpawnedInStep;
+            var go = Instantiate(step.itemPrefab, pos, point.rotation);
+
+            var item = go.GetComponent<PlacementItem>();
+            if (item != null)
+            {
+                item.id = step.itemId;
+                item.isPlaced = false;
+            }
+            else
+            {
+                Debug.LogWarning($"[PlacementManager] На префабе '{step.itemPrefab.name}' нет PlacementItem - призрак его не примет.", step.itemPrefab);
+            }
+
+            spawnedItems.Add(go);
+            itemsSpawnedInStep++;
+        }
+    }
+
+    void CleanupLeftoverItems()
+    {
+        for (int i = spawnedItems.Count - 1; i >= 0; i--)
+        {
+            var go = spawnedItems[i];
+            if (go == null) { spawnedItems.RemoveAt(i); continue; }
+
+            var pi = go.GetComponent<PlacementItem>();
+            if (pi == null || !pi.isPlaced)
+            {
+                Destroy(go);
+                spawnedItems.RemoveAt(i);
+            }
         }
     }
 
@@ -208,7 +331,15 @@ public class PlacementManager : MonoBehaviour
         Destroy(data.go);
         remaining--;
 
-        if (remaining > 0) return; // ждём остальные копии
+        if (remaining > 0)
+        {
+            // ждём остальные копии; если детали спавнятся по одной - выдаём следующую
+            if (index >= 0 && index < steps.Count && steps[index].itemsOneByOne)
+                SpawnItems(steps[index], 1);
+            return;
+        }
+
+        if (destroyLeftoverItems) CleanupLeftoverItems();
 
         nextSpawnPos = CalcNextSpawnPos(placedInStep);
         onStepCompleted?.Invoke();
