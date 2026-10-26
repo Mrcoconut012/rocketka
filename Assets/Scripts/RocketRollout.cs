@@ -6,8 +6,8 @@ using UnityEngine.UI;
 
 /// <summary>
 /// После полной сборки активирует кнопку. По нажатию:
-/// 1) ракета выкатывается в rolloutPoint,
-/// 2) отсчёт, зажигается огонь из сопла, ракета взлетает,
+/// 1) ракета выкатывается в rolloutPoint (вместе с доп. объектами),
+/// 2) отсчёт, зажигается огонь из сопла, ракета взлетает (доп. объекты остаются),
 /// 3) сборка начинается заново (автоматически или по кнопке Restart).
 /// </summary>
 public class RocketRollout : MonoBehaviour
@@ -21,10 +21,15 @@ public class RocketRollout : MonoBehaviour
     [Tooltip("Разворачивать ракету по повороту точки")]
     public bool matchPointRotation = false;
 
+    [Header("Доп. объекты (выкатываются, но не взлетают)")]
+    [Tooltip("Платформа, тележка и т.п. Едут вместе с ракетой, при взлёте остаются на месте")]
+    public List<Transform> extraObjects = new List<Transform>();
+
     [Header("Выкатывание")]
     public float duration = 6f;
     public AnimationCurve curve = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f);
-
+    [Tooltip("Не менять высоту при выкате (ехать только по горизонтали)")]
+    public bool keepHeight = true;
     [Header("Взлёт")]
     public bool launchAfterRollout = true;
     [Tooltip("Сколько секунд после выката до старта")]
@@ -67,9 +72,17 @@ public class RocketRollout : MonoBehaviour
     public UnityEvent onLaunchStarted;
     public UnityEvent onLaunchFinished;
 
+    struct SavedTransform
+    {
+        public Transform t, parent;
+        public Vector3 pos;
+        public Quaternion rot;
+    }
+
     Transform root;
     GameObject flameGO;
     bool ready, rolling, done;
+    readonly List<SavedTransform> savedExtras = new List<SavedTransform>();
 
     void Awake()
     {
@@ -121,6 +134,9 @@ public class RocketRollout : MonoBehaviour
     {
         StopAllCoroutines();
 
+        // вернуть доп. объекты на места ДО уничтожения корня, иначе они удалятся вместе с ним
+        ReleaseExtras(true);
+
         if (root != null) Destroy(root.gameObject);
         root = null;
         if (flameGO != null) Destroy(flameGO);
@@ -150,6 +166,10 @@ public class RocketRollout : MonoBehaviour
         {
             foreach (var r in it.GetComponentsInChildren<Renderer>())
             {
+                // только реальные меши, видимые сейчас
+                if (!(r is MeshRenderer) && !(r is SkinnedMeshRenderer)) continue;
+                if (!r.enabled || !r.gameObject.activeInHierarchy) continue;
+
                 if (!has) { b = r.bounds; has = true; }
                 else b.Encapsulate(r.bounds);
             }
@@ -164,8 +184,42 @@ public class RocketRollout : MonoBehaviour
 
         foreach (var it in items)
             it.transform.SetParent(root, true); // позиции в мире сохраняются
+        foreach (var it in items)
+            foreach (var rb in it.GetComponentsInChildren<Rigidbody>())
+            {
+                rb.linearVelocity = Vector3.zero;       // в старых версиях Unity: rb.velocity
+                rb.angularVelocity = Vector3.zero;
+                rb.isKinematic = true;
+            }
+        // доп. объекты едут вместе с ракетой
+        savedExtras.Clear();
+        foreach (var e in extraObjects)
+        {
+            if (e == null) continue;
+            savedExtras.Add(new SavedTransform
+            {
+                t = e,
+                parent = e.parent,
+                pos = e.position,
+                rot = e.rotation
+            });
+            e.SetParent(root, true);
+        }
+
 
         return true;
+    }
+
+    // отцепить доп. объекты от корня; restore = вернуть и на исходную позицию (при сбросе)
+    void ReleaseExtras(bool restore)
+    {
+        foreach (var s in savedExtras)
+        {
+            if (s.t == null) continue;
+            s.t.SetParent(s.parent, true);
+            if (restore) s.t.SetPositionAndRotation(s.pos, s.rot);
+        }
+        if (restore) savedExtras.Clear();
     }
 
     // ---------- выкатывание ----------
@@ -179,6 +233,7 @@ public class RocketRollout : MonoBehaviour
         Vector3 startPos = root.position;
         Quaternion startRot = root.rotation;
         Vector3 endPos = rolloutPoint.position;
+        if (keepHeight) endPos.y = startPos.y;
         Quaternion endRot = matchPointRotation ? rolloutPoint.rotation : startRot;
 
         float dur = Mathf.Max(0.01f, duration);
@@ -199,6 +254,9 @@ public class RocketRollout : MonoBehaviour
         done = true;
         if (hideButtonAfterUse) SetButton(false);
         onRolloutFinished?.Invoke();
+
+        // доп. объекты остаются на месте выката, дальше двигается только ракета
+        ReleaseExtras(false);
 
         if (launchAfterRollout)
             yield return LaunchRoutine();

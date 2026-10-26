@@ -48,6 +48,37 @@ public class PlacementStep
     [Tooltip("Необязательно: точные позиции И повороты копий (берутся у Transform). Если заполнено, count и copyOffset игнорируются")]
     public Transform[] copyPoints;
 
+    [Header("Авто-спавн самой детали (необязательно)")]
+    [Tooltip("Спавнить деталь автоматически, когда начинается этот шаг. Если выключено - деталь берётся из меню, как раньше")]
+    public bool spawnItem = false;
+
+    [Tooltip("Префаб самой детали (с PlacementItem и XRGrabInteractable). id подставится из itemId")]
+    public GameObject itemPrefab;
+
+    [Tooltip("ЗОНА спавна (Collider, лучше BoxCollider с Is Trigger). Деталь появится в случайной точке внутри зоны. Приоритет выше, чем у точки")]
+    public Collider itemSpawnZone;
+
+    [Tooltip("Минимальное расстояние между деталями в зоне, метры (чтобы не появлялись друг в друге)")]
+    [Min(0f)] public float itemMinSpacing = 0.15f;
+
+    [Tooltip("Точка спавна (используется, если зона не задана). Если пусто - берутся значения по умолчанию из менеджера")]
+    public Transform itemSpawnPoint;
+
+    [Tooltip("Доп. смещение от точки спавна детали")]
+    public Vector3 itemSpawnOffset;
+
+    [Min(0)]
+    [Tooltip("Сколько деталей заспавнить. 0 = столько же, сколько призраков в шаге")]
+    public int itemCount = 0;
+
+    [Tooltip("Смещение каждой следующей детали при спавне в ТОЧКЕ (в зоне не используется - там случайное место)")]
+    public Vector3 itemCopyOffset = new Vector3(0.3f, 0f, 0f);
+
+    [Tooltip("Включено: деталь появляется по одной - следующая после установки предыдущей. Выключено: все сразу")]
+    public bool itemsOneByOne = false;
+
+    public int ItemTotal => itemCount > 0 ? itemCount : TotalCount;
+
     public int TotalCount => (copyPoints != null && copyPoints.Length > 0) ? copyPoints.Length : Mathf.Max(1, count);
 }
 
@@ -71,6 +102,14 @@ public class PlacementManager : MonoBehaviour
     [Tooltip("Запас триггера вокруг призрака, метры")]
     public float triggerPadding = 0.1f;
 
+    [Header("Спавн деталей")]
+    [Tooltip("Общая ЗОНА спавна деталей, если в шаге нет своей зоны или точки")]
+    public Collider defaultItemSpawnZone;
+    [Tooltip("Общая точка спавна деталей, если в шаге нет своей зоны/точки и не задана общая зона")]
+    public Transform defaultItemSpawnPoint;
+    [Tooltip("Когда шаг завершён, удалить заспавненные для него детали, которые так и не поставили")]
+    public bool destroyLeftoverItems = true;
+
     [Header("Прочее")]
     [Tooltip("Ставить низ следующего призрака на точку спавна (режим AfterPrevious)")]
     public bool alignGhostBottomToSpawn = true;
@@ -91,6 +130,9 @@ public class PlacementManager : MonoBehaviour
     readonly List<GhostData> ghosts = new List<GhostData>();
     readonly List<GameObject> placedInStep = new List<GameObject>();
     int remaining;
+
+    readonly List<GameObject> spawnedItems = new List<GameObject>();
+    int itemsSpawnedInStep;
 
     void Start()
     {
@@ -113,6 +155,11 @@ public class PlacementManager : MonoBehaviour
         foreach (var it in PlacementItem.All.ToArray())
             if (it != null && it.isPlaced) Destroy(it.gameObject);
 
+        foreach (var go in spawnedItems)
+            if (go != null) Destroy(go);
+        spawnedItems.Clear();
+        itemsSpawnedInStep = 0;
+
         index = -1;
         nextSpawnPos = firstSpawnPoint != null ? firstSpawnPoint.position : transform.position;
 
@@ -133,6 +180,7 @@ public class PlacementManager : MonoBehaviour
 
     void SpawnStep(PlacementStep step)
     {
+        itemsSpawnedInStep = 0;
         ghosts.Clear();
         placedInStep.Clear();
         remaining = 0;
@@ -179,6 +227,130 @@ public class PlacementManager : MonoBehaviour
         {
             Debug.LogError($"[PlacementManager] Шаг '{step.name}': ни один призрак не создан, шаг пропущен.", this);
             NextStep();
+            return;
+        }
+
+        // авто-спавн детали (если включён в шаге)
+        SpawnItems(step, step.itemsOneByOne ? 1 : step.ItemTotal);
+    }
+
+    // Спавнит до n деталей шага, но не больше ItemTotal.
+    void SpawnItems(PlacementStep step, int n)
+    {
+        if (!step.spawnItem) return;
+
+        if (step.itemPrefab == null)
+        {
+            Debug.LogWarning($"[PlacementManager] В шаге '{step.name}' включён spawnItem, но не задан itemPrefab.", this);
+            return;
+        }
+
+        // приоритет: зона шага -> точка шага -> общая зона -> общая точка
+        Collider zone = step.itemSpawnZone != null
+            ? step.itemSpawnZone
+            : (step.itemSpawnPoint == null ? defaultItemSpawnZone : null);
+        Transform point = step.itemSpawnPoint != null ? step.itemSpawnPoint : defaultItemSpawnPoint;
+
+        if (zone == null && point == null)
+        {
+            Debug.LogWarning($"[PlacementManager] В шаге '{step.name}' не задана зона или точка спавна детали (и нет значений по умолчанию).", this);
+            return;
+        }
+
+        for (int k = 0; k < n && itemsSpawnedInStep < step.ItemTotal; k++)
+        {
+            Vector3 pos;
+            Quaternion rot;
+            if (zone != null)
+            {
+                pos = GetPointInZone(zone, step.itemMinSpacing) + step.itemSpawnOffset;
+                rot = zone.transform.rotation;
+            }
+            else
+            {
+                pos = point.position + step.itemSpawnOffset + step.itemCopyOffset * itemsSpawnedInStep;
+                rot = point.rotation;
+            }
+            var go = Instantiate(step.itemPrefab, pos, rot);
+
+            var item = go.GetComponent<PlacementItem>();
+            if (item != null)
+            {
+                item.id = step.itemId;
+                item.isPlaced = false;
+            }
+            else
+            {
+                Debug.LogWarning($"[PlacementManager] На префабе '{step.itemPrefab.name}' нет PlacementItem - призрак его не примет.", step.itemPrefab);
+            }
+
+            spawnedItems.Add(go);
+            itemsSpawnedInStep++;
+        }
+    }
+
+    // Случайная точка внутри зоны. Старается не попадать рядом с уже заспавненными, ещё не поставленными деталями.
+    Vector3 GetPointInZone(Collider zone, float minSpacing)
+    {
+        Vector3 candidate = zone.bounds.center;
+
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            candidate = RandomPointInZone(zone);
+
+            bool free = true;
+            foreach (var go in spawnedItems)
+            {
+                if (go == null) continue;
+                var pi = go.GetComponent<PlacementItem>();
+                if (pi != null && pi.isPlaced) continue;
+                if (Vector3.Distance(go.transform.position, candidate) < minSpacing) { free = false; break; }
+            }
+            if (free) return candidate;
+        }
+        return candidate; // зона маленькая или занята - ставим куда получилось
+    }
+
+    Vector3 RandomPointInZone(Collider zone)
+    {
+        // BoxCollider: точно внутри бокса с учётом поворота и масштаба
+        var box = zone as BoxCollider;
+        if (box != null)
+        {
+            Vector3 h = box.size * 0.5f;
+            Vector3 local = box.center + new Vector3(
+                UnityEngine.Random.Range(-h.x, h.x),
+                UnityEngine.Random.Range(-h.y, h.y),
+                UnityEngine.Random.Range(-h.z, h.z));
+            return box.transform.TransformPoint(local);
+        }
+
+        // остальные коллайдеры: случайная точка в bounds, которая действительно лежит внутри
+        Bounds b = zone.bounds;
+        for (int i = 0; i < 30; i++)
+        {
+            Vector3 p = new Vector3(
+                UnityEngine.Random.Range(b.min.x, b.max.x),
+                UnityEngine.Random.Range(b.min.y, b.max.y),
+                UnityEngine.Random.Range(b.min.z, b.max.z));
+            if ((zone.ClosestPoint(p) - p).sqrMagnitude < 0.0001f) return p;
+        }
+        return b.center;
+    }
+
+    void CleanupLeftoverItems()
+    {
+        for (int i = spawnedItems.Count - 1; i >= 0; i--)
+        {
+            var go = spawnedItems[i];
+            if (go == null) { spawnedItems.RemoveAt(i); continue; }
+
+            var pi = go.GetComponent<PlacementItem>();
+            if (pi == null || !pi.isPlaced)
+            {
+                Destroy(go);
+                spawnedItems.RemoveAt(i);
+            }
         }
     }
 
@@ -232,10 +404,18 @@ public class PlacementManager : MonoBehaviour
         Destroy(data.go);
         remaining--;
 
-        if (remaining > 0) return; // ждём остальные копии
+        if (remaining > 0)
+        {
+            // ждём остальные копии; если детали спавнятся по одной - выдаём следующую
+            if (index >= 0 && index < steps.Count && steps[index].itemsOneByOne)
+                SpawnItems(steps[index], 1);
+            return;
+        }
 
-        nextSpawnPos = CalcNextSpawnPos(placedInStep);
-        onStepCompleted?.Invoke();
+        if (destroyLeftoverItems) CleanupLeftoverItems();
+
+        onStepCompleted?.Invoke(); // подписчики (например RotatePlacedParts) могут вернуть детали в исходное положение
+        nextSpawnPos = CalcNextSpawnPos(placedInStep); // считаем уже после них
         NextStep();
     }
 
